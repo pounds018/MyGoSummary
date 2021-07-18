@@ -36,7 +36,7 @@ golint检测代码有2种方式
 
  在setting  ->  tools  ->  file watcher 里面点左下角的 `+` 添加 golangci-lint.配置如图:  
 
-![image-20210718233007805](E:\doc\MyGoSummary\docs\chapter24_GoDevKit\1_GoDevKit.assets\image-20210718233007805.png)
+![image-20210718233007805](1_GoDevKit.assets/image-20210718233007805.png)
 
 `auto-save` 那个选项尽量不要勾选,触发的速度太快了影响写代码
 
