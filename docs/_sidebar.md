@@ -2,5 +2,7 @@
     * [第一节 go语言概述](_content/chapter01_GoSyntax/01_go概述.md)
     * [第二节 go基础语法](_content/chapter01_GoSyntax/02_go基础语法.md)
     * [第三节 go进阶语法](_content/chapter01_GoSyntax/03_go进阶语法.md)
+    * [第四节 go操作Redis](_content/chapter02_GoFramework/1_GoRedis.md)
+    * [第五节 go操作Mysql](_content/chapter02_GoFramework/2_GoMysql.md)
 * [第 23 章 go命令](_content/chapter23_GoCmd/coverpage.md)
 * [第 24 章 go开发工具](_content/chapter24_GoDevKit/coverpage.md)
