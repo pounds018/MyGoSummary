@@ -861,6 +861,10 @@ func QueryAndOrderByIDs(ids []int)(users []User, err error){
 
 ## 2.6 GORM:
 
+gorm是类似与java `mybatis`的一个ORM框架.
+
+[官网地址](https://gorm.io/zh_CN/docs/)
+
 ###　2.6.1 特性:
 
 - 全功能 ORM
@@ -880,7 +884,239 @@ func QueryAndOrderByIDs(ids []int)(users []User, err error){
 
 ```go
 go get -u gorm.io/gorm
+go get -u gorm.io/driver/mysql // 数据库连接驱动依赖可以任意选择
 ```
 
 ### 2.6.3  模型定义:
+
+#### 1. gorm的一些约定:
+
+- 默认情况下，GORM 使用 `ID` 作为主键，使用结构体名的 `蛇形复数` 作为表名，字段名的 `蛇形` 作为列名，并使用 `CreatedAt`、`UpdatedAt` 字段追踪创建、更新时间. 将这个结构体(`gorm.Model`)嵌入到自定义的结构体, 即可实现这一约定.
+
+  ```go
+  // gorm.Model 的定义
+  type Model struct {
+    ID        uint           `gorm:"primaryKey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt gorm.DeletedAt `gorm:"index"`
+  }
+  ```
+
+- 自定义约定:
+
+  **表名:** gorm 默认使用结构体的`蛇形复数` 形式作为表名, 即 `结构体User`的表名为 `users`.
+
+  - 固定表名:
+
+    通过实现`Tabler接口`来更改默认的表名.
+
+    ```go
+    type Tabler interface {
+        TableName() string
+    }
+    
+    // TableName 会将 User 的表名重写为 `profiles`
+    func (User) TableName() string {
+      return "profiles"
+    }
+    ```
+
+  - 动态表名:
+
+    > **注意：** `TableName` 不支持动态变化，它会被缓存下来以便后续使用。
+
+    想要使用动态表名，可以使用 `Scopes`，例如：
+
+    ```go
+    func UserTable(user User) func (tx *gorm.DB) *gorm.DB {
+      return func (tx *gorm.DB) *gorm.DB {
+        if user.Admin {
+          return tx.Table("admin_users")
+        }
+    
+        return tx.Table("users")
+      }
+    }
+    // 动态表名
+    db.Scopes(UserTable(user)).Create(&user)
+    ```
+
+  - 临时表名: `主要是用于实现子查询`
+
+    您可以使用 `Table` 方法临时指定表名，例如：
+
+    ```go
+    // 根据 User 的字段创建 `deleted_users` 表
+    db.Table("deleted_users").AutoMigrate(&User{})
+    
+    // 从另一张表查询数据
+    var deletedUsers []User
+    db.Table("deleted_users").Find(&deletedUsers)
+    // SELECT * FROM deleted_users;
+    
+    db.Table("deleted_users").Where("name = ?", "jinzhu").Delete(&User{})
+    // DELETE FROM deleted_users WHERE name = 'jinzhu';
+    ```
+
+  **命名策略**: 
+
+  GORM 允许用户通过覆盖默认的`命名策略`更改默认的命名约定，命名策略被用于构建： `TableName`、`ColumnName`、`JoinTableName`、`RelationshipFKName`、`CheckerName`、`IndexName`。
+
+  默认规则: 以列名为例子
+
+  ```go
+  type User struct {
+    ID        uint      // 列名是 `id`
+    Name      string    // 列名是 `name`
+    Birthday  time.Time // 列名是 `birthday`
+    CreatedAt time.Time // 列名是 `created_at`
+  }
+  ```
+
+  修改方法: 可以使用 `column` 标签或 [`命名策略`](https://gorm.io/zh_CN/docs/conventions.html#naming_strategy) 来覆盖列名, 下面展示的就是`tag`的方式
+
+  ```go
+  type Animal struct {
+    AnimalID int64     `gorm:"column:beast_id"`         // 将列名设为 `beast_id`
+    Birthday time.Time `gorm:"column:day_of_the_beast"` // 将列名设为 `day_of_the_beast`
+    Age      int64     `gorm:"column:age_of_the_beast"` // 将列名设为 `age_of_the_beast`
+  }
+  ```
+
+  **模型相关时间字段**:
+
+  `CreateAt`:
+
+  对于有 `CreatedAt` 字段的模型，创建记录时，如果该字段值为零值，则将该字段的值设为当前时间
+
+  ```go
+  db.Create(&user) // 将 `CreatedAt` 设为当前时间
+  
+  user2 := User{Name: "jinzhu", CreatedAt: time.Now()}
+  db.Create(&user2) // user2 的 `CreatedAt` 不会被修改
+  
+  // 想要修改该值，您可以使用 `Update`
+  db.Model(&user).Update("CreatedAt", time.Now())
+  ```
+
+  `updateAt`:
+
+  对于有 `UpdatedAt` 字段的模型，更新记录时，将该字段的值设为当前时间。创建记录时，如果该字段值为零值，则将该字段的值设为当前时间
+
+  ```go
+  db.Save(&user) // 将 `UpdatedAt` 设为当前时间
+  
+  db.Model(&user).Update("name", "jinzhu") // 会将 `UpdatedAt` 设为当前时间
+  
+  db.Model(&user).UpdateColumn("name", "jinzhu") // `UpdatedAt` 不会被修改
+  
+  user2 := User{Name: "jinzhu", UpdatedAt: time.Now()}
+  db.Create(&user2) // 创建记录时，user2 的 `UpdatedAt` 不会被修改
+  
+  user3 := User{Name: "jinzhu", UpdatedAt: time.Now()}
+  db.Save(&user3) // 更新世，user3 的 `UpdatedAt` 会修改为当前时间
+  ```
+
+  **注意** GORM 支持拥有多种类型的时间追踪字段。可以根据 UNIX（毫/纳）秒.  `autoCreateTime`、`autoUpdateTime` 标签就是用来自动填充时间的
+
+  ```go
+  type User struct {
+    CreatedAt time.Time // 在创建时，如果该字段值为零值，则使用当前时间填充
+    UpdatedAt int       // 在创建时该字段值为零值或者在更新时，使用当前时间戳秒数填充
+    Updated   int64 `gorm:"autoUpdateTime:nano"` // 使用时间戳填纳秒数充更新时间
+    Updated   int64 `gorm:"autoUpdateTime:milli"` // 使用时间戳毫秒数填充更新时间
+    Created   int64 `gorm:"autoCreateTime"`      // 使用时间戳秒数填充创建时间
+  }
+  ```
+
+#### 2. model嵌入结构体:
+
+- `通过继承的方式, 嵌入model`:
+
+  ```go
+  type User struct {
+    gorm.Model
+    Name string
+  }
+  // 等效于
+  type User struct {
+    ID        uint           `gorm:"primaryKey"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+    DeletedAt gorm.DeletedAt `gorm:"index"`
+    Name string
+  }
+  ```
+
+- `通过tag嵌入model: 对于正常的结构体字段，可以通过标签 `embedded` 将其嵌入, 并且可以使用标签 `embeddedPrefix` 来为 db 中的字段名添加前缀，例如：
+
+  ```go
+  type Author struct {
+      Name  string
+      Email string
+  }
+  type Blog struct {
+    ID      int
+    Author  Author `gorm:"embedded;embeddedPrefix:author_"`
+    Upvotes int32
+  }
+  // 等效于
+  type Blog struct {
+    ID          int64
+    AuthorName  string
+    AuthorEmail string
+    Upvotes     int32
+  }
+  ```
+
+#### 3. 字段标签:
+
+声明 model 时，tag 是可选的，GORM 支持以下 tag： tag 名大小写不敏感，但建议使用 `camelCase` 风格
+
+| 标签名                 | 说明                                                         |
+| :--------------------- | :----------------------------------------------------------- |
+| column                 | 指定 db 列名                                                 |
+| type                   | `列数据库数据类型`，推荐使用兼容性好的通用类型，例如：所有数据库都支持 bool、int、uint、float、string、time、bytes 并且可以和其他标签一起使用，例如：`not null`、`size`, `autoIncrement`… 像 `varbinary(8)` 这样指定数据库数据类型也是支持的。在使用指定数据库数据类型时，它需要是完整的数据库数据类型，如：`MEDIUMINT UNSIGNED not NULL AUTO_INCREMENT` |
+| size                   | 指定列大小，例如：`size:256`                                 |
+| primaryKey             | 指定列为主键                                                 |
+| unique                 | 指定列为唯一                                                 |
+| default                | 指定列的默认值                                               |
+| precision              | 指定列的精度                                                 |
+| scale                  | 指定列大小                                                   |
+| not null               | 指定列为 NOT NULL                                            |
+| autoIncrement          | 指定列为自动增长                                             |
+| autoIncrementIncrement | 自动步长，控制连续记录之间的间隔                             |
+| embedded               | 嵌套字段                                                     |
+| embeddedPrefix         | 嵌入字段的列名前缀                                           |
+| autoCreateTime         | 创建时追踪当前时间，对于 `int` 字段，它会追踪秒级时间戳，您可以使用 `nano`/`milli` 来追踪纳秒、毫秒时间戳，例如：`autoCreateTime:nano` |
+| autoUpdateTime         | 创建/更新时追踪当前时间，对于 `int` 字段，它会追踪秒级时间戳，您可以使用 `nano`/`milli` 来追踪纳秒、毫秒时间戳，例如：`autoUpdateTime:milli` |
+| index                  | 根据参数创建索引，多个字段使用相同的名称则创建复合索引，查看 [索引](https://gorm.io/zh_CN/docs/indexes.html) 获取详情 |
+| uniqueIndex            | 与 `index` 相同，但创建的是唯一索引                          |
+| check                  | 创建检查约束，例如 `check:age > 13`，查看 [约束](https://gorm.io/zh_CN/docs/constraints.html) 获取详情 |
+| <-                     | 设置字段写入的权限， `<-:create` 只创建、`<-:update` 只更新、`<-:false` 无写入权限、`<-` 创建和更新权限 |
+| ->                     | 设置字段读的权限，`->:false` 无读权限                        |
+| -                      | 忽略该字段，`-` 无读写权限                                   |
+| comment                | 迁移时为字段添加注释                                         |
+
+#### 4. 模型的高级选项:
+
+gorm支持在模型中对字段配置`crud操作`的权限. `写是包含create和update两个权限`
+
+```go
+type User struct {
+  Name string `gorm:"<-:create"` // 允许读和创建
+  Name string `gorm:"<-:update"` // 允许读和更新
+  Name string `gorm:"<-"`        // 允许读和写（创建和更新）
+  Name string `gorm:"<-:false"`  // 允许读，禁止写
+  Name string `gorm:"->"`        // 只读（除非有自定义配置，否则禁止写）
+  Name string `gorm:"->;<-:create"` // 允许读和写
+  Name string `gorm:"->:false;<-:create"` // 仅创建（禁止从 db 读）
+  Name string `gorm:"-"`  // 通过 struct 读写会忽略该字段
+}
+```
+
+> **注意：** 使用 GORM Migrator 创建表时，不会创建被忽略的字段
+
+
 
