@@ -6,3 +6,4 @@
     * [第五节 go操作Mysql](_content/chapter02_GoFramework/2_GoMysql.md)
 * [第 23 章 go命令](_content/chapter23_GoCmd/coverpage.md)
 * [第 24 章 go开发工具](_content/chapter24_GoDevKit/coverpage.md)
+* [第 25 章 polaris学习](_content/chapter25_PolarisStudy/coverpage.md)
