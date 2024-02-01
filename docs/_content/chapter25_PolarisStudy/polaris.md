@@ -883,6 +883,15 @@ public class UpdateServiceTask implements Runnable {
         }
     }
 }
+	
+// 这个是UpdateServiceTask定时任务的创建
+    @Override
+    public void postContextInit(Extensions ctx) throws PolarisException {
+        if (initialized) {
+            this.updateServiceExecutor.scheduleWithFixedDelay(new UpdateServiceTask(), TASK_RETRY_INTERVAL_MS,
+                    TASK_RETRY_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }
+    }
 ```
 
 
