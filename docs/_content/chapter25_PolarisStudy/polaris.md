@@ -666,3 +666,212 @@ plugin:
 <img src="polaris/image-20240124004226082.png" alt="image-20240124004226082" style="zoom: 150%;" />
 
 客户端路由处理流程:
+
+入口getOnInstance:
+
+获取的时候, 构建一个GetResourcesInvoker对象. 在构建GetResourcesInvoker对象的时候, 会根据配置的事件分别创建不同的定时任务去持续的通过grpc发送请求给服务端的descovery接口, 根据传参获取对应类型的数据.
+
+客户端每次启动之后, 第一次缓存中获取资源时, 都会默认认为没有被初始化过, 需要走创建定时任务的流程.
+
+new GetResourcesInvoker().
+
+```java
+public GetResourcesInvoker(ServiceEventKeysProvider paramProvider,
+        Extensions extensions, boolean internalRequest, boolean useCache) throws PolarisException {
+    this.extensions = extensions;
+    this.internalRequest = internalRequest;
+    this.totalCallback = init(paramProvider);
+    this.useCache = useCache;
+}
+```
+
+getResourceInvoker.init()
+
+```java
+private int init(ServiceEventKeysProvider paramProvider) throws PolarisException {
+    LocalRegistry localRegistry = extensions.getLocalRegistry();
+    int callbacks = 0;
+    if (!CollectionUtils.isEmpty(paramProvider.getSvcEventKeys())) {
+        // 会把所有需要的事件都去创建定时任务, 定时拉取.
+        for (ServiceEventKey svcEventKey : paramProvider.getSvcEventKeys()) {
+            listeningServices.add(svcEventKey);
+            callbacks = processSvcEventKey(localRegistry, callbacks, svcEventKey);
+        }
+    }
+    if (null != paramProvider.getSvcEventKey()) {
+        listeningServices.add(paramProvider.getSvcEventKey());
+        callbacks = processSvcEventKey(localRegistry, callbacks, paramProvider.getSvcEventKey());
+    }
+    return callbacks;
+}
+```
+
+```java
+private int processSvcEventKey(LocalRegistry localRegistry, int callbacks, ServiceEventKey svcEventKey) {
+    ResourceFilter filter = new ResourceFilter(svcEventKey, internalRequest, useCache);
+    switch (svcEventKey.getEventType()) {
+        case INSTANCE:
+            ServiceInstances instances = localRegistry.getInstances(filter);
+            if (instances.isInitialized()) {
+                resourcesResponse.addServiceInstances(svcEventKey, instances);
+            } else {
+                localRegistry.loadInstances(svcEventKey, this);
+                callbacks++;
+            }
+            break;
+        case SERVICE:
+            Services services = localRegistry.getServices(filter);
+            if (services.isInitialized()) {
+                resourcesResponse.addServices(svcEventKey, services);
+            } else {
+                localRegistry.loadServices(svcEventKey, this);
+                callbacks++;
+            }
+            break;
+        default:
+            ServiceRule serviceRule = localRegistry.getServiceRule(filter);
+            // 客户端刚启动的时候, 一定是没有初始化的, 一定会else
+            if (serviceRule.isInitialized()) {
+                resourcesResponse.addServiceRule(svcEventKey, serviceRule);
+            } else {
+                localRegistry.loadServiceRule(svcEventKey, this);
+                callbacks++;
+            }
+            break;
+    }
+    return callbacks;
+}
+```
+
+localRegistry.loadRemoteValue(svcEventKey, notifier)
+
+```java
+private void loadRemoteValue(ServiceEventKey svcEventKey, EventCompleteNotifier notifier) throws PolarisException {
+    checkDestroyed();
+    CacheHandler handler = cacheHandlers.get(svcEventKey.getEventType());
+    if (null == handler) {
+        throw new PolarisException(ErrorCode.INTERNAL_ERROR,
+                String.format("[LocalRegistry] unRegistered resource type %s", svcEventKey.getEventType()));
+    }
+    CacheObject cacheObject = resourceMap
+            .computeIfAbsent(svcEventKey,
+                    serviceEventKey -> new CacheObject(handler, svcEventKey, InMemoryRegistry.this)
+            );
+    //添加监听器
+    cacheObject.addNotifier(notifier);
+    //触发往serverConnector注册
+    if (cacheObject.startRegister()) {
+        LOG.info("[LocalRegistry]start to register service handler for {}", svcEventKey);
+        try {
+            connector.registerServiceHandler(
+                    enhanceServiceEventHandler(new ServiceEventHandler(svcEventKey, cacheObject)));
+        } catch (Throwable e) {
+            PolarisException polarisException;
+            if (e instanceof PolarisException) {
+                polarisException = (PolarisException) e;
+            } else {
+                polarisException = new PolarisException(ErrorCode.INTERNAL_ERROR,
+                        String.format("exception occurs while registering service handler for %s", svcEventKey));
+            }
+            cacheObject.resumeUnRegistered(polarisException);
+            throw polarisException;
+        }
+        if (svcEventKey.getEventType() == EventType.INSTANCE) {
+            //注册了监听后，认为是被用户需要的服务，加入serviceSet
+            services.put(svcEventKey.getServiceKey(), true);
+        }
+    }
+}
+```
+
+connector.registerServiceHandler(
+                        enhanceServiceEventHandler(new ServiceEventHandler(svcEventKey, cacheObject)));
+
+```java
+public void registerServiceHandler(ServiceEventHandler handler) throws PolarisException {
+    checkDestroyed();
+    ServiceUpdateTask serviceUpdateTask = new CompositeServiceUpdateTask(handler, this);
+    submitServiceHandler(serviceUpdateTask, 0);
+}
+```
+
+```java
+protected void submitServiceHandler(ServiceUpdateTask updateTask, long delayMs) {
+    LOG.debug("[ServerConnector]task for service {} has been scheduled discover", updateTask);
+    sendDiscoverExecutor.schedule(updateTask, delayMs, TimeUnit.MILLISECONDS);
+}
+```
+
+```java
+protected void execute() {
+    CompositeConnector connector = (CompositeConnector) serverConnector;
+    for (DestroyableServerConnector sc : connector.getServerConnectors()) {
+        if (SERVER_CONNECTOR_GRPC.equals(sc.getName()) && sc.isDiscoveryEnable()) {
+            GrpcServiceUpdateTask grpcServiceUpdateTask = new GrpcServiceUpdateTask(serviceEventHandler, sc);
+            grpcServiceUpdateTask.execute(this);
+            return;
+        }
+    }
+    boolean svcDeleted = this.notifyServerEvent(
+            new ServerEvent(serviceEventKey, DiscoverResponse.newBuilder().build(), null));
+    if (!svcDeleted) {
+        this.addUpdateTaskSet();
+    }
+}
+```
+
+> CompositeServiceUpdateTask就是一个runable, 主要作用是通过grpc先服务端请求对应serviceEvent的数据.
+
+接收到响应后:
+
+SpecStreamClient.onNext()方法中, 回调事件处理器, 实际上就是缓存中对应时间的cacheObject.
+
+```java
+public void onNext(ResponseProto.DiscoverResponse response) {
+    lastRecvTimeMs.set(System.currentTimeMillis());
+    ValidResult validResult = validMessage(response);
+    if (validResult.errorCode != ErrorCode.Success) {
+        exceptionCallback(validResult);
+        return;
+    }
+    ServiceProto.Service service = response.getService();
+    ServiceKey serviceKey = new ServiceKey(service.getNamespace().getValue(), service.getName().getValue());
+    EventType eventType = GrpcUtil.buildEventType(response.getType());
+    ServiceEventKey serviceEventKey = new ServiceEventKey(serviceKey, eventType);
+    ServiceUpdateTask updateTask;
+    synchronized (clientLock) {
+        updateTask = removePendingTask(serviceEventKey);
+    }
+    if (null == updateTask) {
+        LOG.warn("[ServerConnector]callback not found for:{}", TextFormat.shortDebugString(service));
+        return;
+    }
+    if (updateTask.getTaskType() == Type.FIRST) {
+        LOG.info("[ServerConnector]request(id={}) receive response for {}", getReqId(), serviceEventKey);
+    } else {
+        LOG.debug("[ServerConnector]request(id={}) receive response for {}", getReqId(), serviceEventKey);
+    }
+    boolean svcDeleted = updateTask.notifyServerEvent(new ServerEvent(serviceEventKey, response, null));
+    if (!svcDeleted) {
+        updateTask.addUpdateTaskSet();
+    }
+}
+```
+
+回到CompositeServiceUpdateTask.notifyServerEvent, 调用各自的cacheObject
+
+cacheObject.onEventUpdate():
+
+1. 请求响应出错了: 熔断信息获取事件会做一些相关的操作, 其他事件什么也不做. `如果错误信息是没有服务信息, 会直接删除掉缓存.`
+2. 正常请求
+   1. 缓存中没有, 或者reversion不同, 进行缓存持久化, 缓存更新, 监听器通知数据更新, 进行后续操作, (路由信息获取没有后续操作).
+   2. 缓存中没有, 但是服务端也没有数据, 记录一下error日志
+   3. 缓存中没有, 或者是从持久化文件中加载出来的数据, 且事件是实例数据更新事件, 设置服务端服务可用.
+   4. 异常通知逻辑.
+
+
+
+**后续获取**: 从缓存中获取数据
+
+
+
