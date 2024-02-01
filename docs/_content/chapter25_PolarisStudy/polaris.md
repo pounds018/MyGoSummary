@@ -851,12 +851,41 @@ public void onNext(ResponseProto.DiscoverResponse response) {
     } else {
         LOG.debug("[ServerConnector]request(id={}) receive response for {}", getReqId(), serviceEventKey);
     }
+    
+    // 服务被删除就不再持续获取该服务的数据
     boolean svcDeleted = updateTask.notifyServerEvent(new ServerEvent(serviceEventKey, response, null));
     if (!svcDeleted) {
         updateTask.addUpdateTaskSet();
     }
 }
 ```
+
+下面这段代码, 是持续查询的原理.
+
+```java
+    boolean svcDeleted = updateTask.notifyServerEvent(new ServerEvent(serviceEventKey, response, null));
+    if (!svcDeleted) {
+        updateTask.addUpdateTaskSet();
+    }
+
+public class UpdateServiceTask implements Runnable {
+
+    @Override
+    public void run() {
+        for (ServiceUpdateTask serviceUpdateTask : updateTaskSet.values()) {
+            if (isDestroyed()) {
+                break;
+            }
+            if (!serviceUpdateTask.needUpdate()) {
+                continue;
+            }
+            submitServiceHandler(serviceUpdateTask, 0);
+        }
+    }
+}
+```
+
+
 
 回到CompositeServiceUpdateTask.notifyServerEvent, 调用各自的cacheObject
 
